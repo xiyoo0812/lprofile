@@ -1,37 +1,25 @@
 # lprofile
+一个使用lua解析excel的xlsx/xlsm格式的库。
 
-#### 介绍
-基于luahook的lua性能测试库！
+# 依赖
+- [lua](https://github.com/xiyoo0812/lua.git)5.2以上
+- [luakit](https://github.com/xiyoo0812/luakit.git)一个luabind库
+- 项目路径如下<br>
+  |--proj <br>
+  &emsp;|--lua <br>
+  &emsp;|--lprofile <br>
+  &emsp;|--luakit
 
-#### 软件架构
-软件架构说明
+# 编译
+- msvc: 准备好lua依赖库并放到指定位置，将proj文件加到sln后编译。
+- linux: 准备好lua依赖库并放到指定位置，执行make -f lprofile.mak
 
+# 用法
+```lua
+local profile = require('lprofile')
 
-#### 安装教程
+profile.hook()
+profile.start()
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
-
-#### 使用说明
-
-1.  xxxx
-2.  xxxx
-3.  xxxx
-
-#### 参与贡献
-
-1.  Fork 本仓库
-2.  新建 Feat_xxx 分支
-3.  提交代码
-4.  新建 Pull Request
-
-
-#### 特技
-
-1.  使用 Readme\_XXX.md 来支持不同的语言，例如 Readme\_en.md, Readme\_zh.md
-2.  Gitee 官方博客 [blog.gitee.com](https://blog.gitee.com)
-3.  你可以 [https://gitee.com/explore](https://gitee.com/explore) 这个地址来了解 Gitee 上的优秀开源项目
-4.  [GVP](https://gitee.com/gvp) 全称是 Gitee 最有价值开源项目，是综合评定出的优秀开源项目
-5.  Gitee 官方提供的使用手册 [https://gitee.com/help](https://gitee.com/help)
-6.  Gitee 封面人物是一档用来展示 Gitee 会员风采的栏目 [https://gitee.com/gitee-stars/](https://gitee.com/gitee-stars/)
+profile.dump()
+```
