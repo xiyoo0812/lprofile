@@ -8,9 +8,13 @@ namespace lprofile {
     luakit::lua_table open_lprofile(lua_State* L) {
         luakit::kit_state kit_state(L);
         auto prof = kit_state.new_table("profile");
-        prof.set_function("start", []() { tprofile.start(); });
+        prof.set_function("enable", []() { tprofile.enable(); });
+        prof.set_function("disable", []() { tprofile.disable(); });
         prof.set_function("hook", [](lua_State* pL) { 
             return tprofile.hook(pL);
+        });
+        prof.set_function("watch", [](lua_State* pL) {
+            return tprofile.watch(pL);
         });
         prof.set_function("dump", [](lua_State* pL, uint32_t top) {
             return tprofile.dump(pL, top);
@@ -23,9 +27,6 @@ namespace lprofile {
         });
         prof.set_function("ignore_func", [](cpchar funcname) {
             tprofile.ignore_func(funcname);
-        });
-        prof.set_function("watch_file", [](cpchar filename) {
-            tprofile.watch_file(filename);
         });
         return prof;
     }

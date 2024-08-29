@@ -1,7 +1,7 @@
 #pragma once
 
 #include <set>
-#include <deque>
+#include <list>
 #include <string>
 #include <chrono>
 #include <unordered_map>
@@ -15,20 +15,24 @@ using namespace std::chrono;
 using cpchar = const char*;
 
 namespace lprofile {
+    
+    static thread_local bool t_profilable = false;
+
     struct call_frame {
         bool inlua = true;
         bool tail = false;
         cpchar name = nullptr;
         cpchar source = nullptr;
         uint32_t line = 0;
-        uint64_t call_tick;
         uint64_t pointer = 0;
+        uint64_t sub_cost = 0;
+        uint64_t call_tick = 0;
     };
 
     struct call_info {
         lua_State* co = nullptr;
-        uint64_t sub_cost = 0;
-        deque<call_frame> call_list;
+        uint64_t leave_tick = 0;
+        list<call_frame> call_list;
     };
 
     class eval_data {
@@ -53,19 +57,25 @@ namespace lprofile {
 
     class profile {
     public:
-        void start() {
-            m_profilable = true;
+        void enable() {
+            t_profilable = true;
         }
 
-        int ignore(lua_State* L, cpchar library) {
+        void disable() {
+            t_profilable = false;
+        }
+
+        int ignore(lua_State* L, cpchar key) {
             lua_guard g(L);
-            lua_getglobal(L, library);
+            lua_getglobal(L, key);
             if (lua_istable(L, -1)) {
                 lua_pushnil(L);
                 while (lua_next(L, -2) != 0) {
                     if (lua_isfunction(L, -1)) {
+                        char buf[CHAR_MAX] = {};
+                        snprintf(buf, CHAR_MAX, "%s.%s", key, lua_tostring(L, -2));
                         uint64_t pointer = (uint64_t)lua_topointer(L, -1);
-                        m_ignores.emplace(pointer, true);
+                        m_ignore_funcs.emplace(pointer, buf);
                     }
                     lua_pop(L, 1);
                 }
@@ -73,25 +83,36 @@ namespace lprofile {
             }
             if (lua_isfunction(L, -1)) {
                 uint64_t pointer = (uint64_t)lua_topointer(L, -1);
-                m_ignores.emplace(pointer, true);
+                m_ignore_funcs.emplace(pointer, key);
             }
             return 0;
         }
 
         void ignore_file(cpchar filename) {
-            m_filters.emplace(filename, true);
+            m_ignore_files.emplace(filename, true);
         }
 
         void ignore_func(cpchar funcname) {
-            m_names.emplace(funcname, true);
+            m_ignore_names.emplace(funcname, true);
         }
 
-        void watch_file(cpchar filename) {
-            m_watchs.emplace(filename, true);
+        int watch(lua_State* L) {
+            cpchar name = lua_tolstring(L, 1, nullptr);
+            if (lua_type(L, 2) == LUA_TTABLE) {
+                lua_getfield(L, 2, name);
+                if (lua_isfunction(L, -1)) {
+                    uint64_t pointer = (uint64_t)lua_topointer(L, -1);
+                    m_watch_funcs.emplace(pointer, name);
+                }
+                return 0;
+            }
+            m_watch_files.emplace(name, true);
+            return 0;
         }
 
         int hook(lua_State* L) {
             auto luahook = [](lua_State* DL, lua_Debug* ar) {
+                if (!t_profilable) return;
                 lua_guard g(DL);
                 lua_getfield(DL, LUA_REGISTRYINDEX, "profile");
                 profile* prof = (profile*)lua_touserdata(DL, -1);
@@ -136,7 +157,7 @@ namespace lprofile {
                 lua_setfield(L, -2, "src");
                 native_to_lua(L, data.inlua ? "L" : "C");
                 lua_setfield(L, -2, "flag");
-                native_to_lua(L, round(data.total_time * 1000 / data.call_count) / 1000000);
+                native_to_lua(L, round(data.total_time / data.call_count) / 1000);
                 lua_setfield(L, -2, "avg");
                 native_to_lua(L, round(data.total_time * 1000 / m_all_times) / 10);
                 lua_setfield(L, -2, "per");
@@ -144,6 +165,8 @@ namespace lprofile {
                 lua_setfield(L, -2, "min");
                 native_to_lua(L, double(data.max_time) / 1000);
                 lua_setfield(L, -2, "max");
+                native_to_lua(L, double(data.total_time) / 1000);
+                lua_setfield(L, -2, "all");
                 native_to_lua(L, data.call_count);
                 lua_setfield(L, -2, "count");
                 lua_seti(L, -2, i++);
@@ -155,26 +178,34 @@ namespace lprofile {
 
     protected:
         void prof_hook(lua_State* L, lua_Debug* arv) {
-            if (!m_profilable) return;
-            if (arv->event == LUA_HOOKCALL || arv->event == LUA_HOOKTAILCALL) {
-                if (m_call_infos.empty() || m_call_infos.back().co != L) {
-                    m_call_infos.push_back(call_info{ L });
+            uint64_t co_cost = 0;
+            uint64_t nowtick = now();
+            call_info* old_ci = m_cur_ci;
+            if (old_ci && old_ci->co != L) {
+                old_ci->leave_tick = nowtick;
+            }
+            auto it = m_call_infos.find(L);
+            if (it == m_call_infos.end()) {
+                m_cur_ci = new call_info{ L };
+                m_call_infos.emplace(L, m_cur_ci);
+            } else {
+                m_cur_ci = it->second;
+                if (old_ci != m_cur_ci && m_cur_ci->leave_tick > 0) {
+                    co_cost = nowtick - m_cur_ci->leave_tick;
                 }
+            }
+            if (arv->event == LUA_HOOKCALL || arv->event == LUA_HOOKTAILCALL) {
                 lua_Debug ar;
                 lua_getstack(L, 0, &ar);
                 lua_getinfo(L, "nSlf", &ar);
                 call_frame frame;
-                frame.name = ar.name;
                 frame.source = ar.source;
                 frame.line = ar.linedefined;
-                frame.pointer = (uint64_t)lua_topointer(L, -1);
-                frame.tail = arv->event == LUA_HOOKTAILCALL;
-                frame.call_tick = now();
                 if (ar.what[0] == 'C') {
                     frame.inlua = false;
                     lua_Debug arv;
                     int i = 0;
-                    while(true) {
+                    while (true) {
                         if (!lua_getstack(L, ++i, &arv)) break;
                         lua_getinfo(L, "Sl", &arv);
                         if (arv.what[0] != 'C') {
@@ -184,85 +215,48 @@ namespace lprofile {
                         }
                     }
                 }
-                call_info& ci = m_call_infos.back();
-                ci.call_list.push_back(frame);
+                frame.name = ar.name ? ar.name : "null";
+                frame.pointer = (uint64_t)lua_topointer(L, -1);
+                frame.tail = arv->event == LUA_HOOKTAILCALL;
+                frame.call_tick = now();
+                m_cur_ci->call_list.push_back(frame);
                 return;
             }
             if (arv->event == LUA_HOOKRET) {
-                if (!m_call_infos.empty()) {
-                    call_info& ci = m_call_infos.back();
-                    if (ci.co != L) return;
-                    while (true) {
-                        if (ci.call_list.empty()) {
-                            m_call_infos.pop_back();
-                            break;
-                        }
-                        call_frame& cur_frame = ci.call_list.back();
-                        uint64_t call_cost = now() - cur_frame.call_tick - ci.sub_cost;
-                        ci.sub_cost += call_cost;
-                        record_eval(cur_frame, call_cost);
-                        ci.call_list.pop_back();
-                        if (ci.call_list.empty()) break;
-                        if (!ci.call_list.back().tail) break;
-                    }
-                    ci.sub_cost = 0;
+                auto& call_list = m_cur_ci->call_list;
+                if (call_list.empty()) return;
+                while (true) {
+                    uint64_t now_tick = now();
+                    call_frame& cur_frame = call_list.back();
+                    uint64_t diff = now_tick - cur_frame.call_tick;
+                    uint64_t call_cost = diff - cur_frame.sub_cost;
+                    record_eval(cur_frame, call_cost);
+                    call_list.pop_back();
+                    if (call_list.empty()) break;
+                    //排除掉记录的时间
+                    uint64_t rd_tick = now() - now_tick;
+                    call_list.back().sub_cost += (cur_frame.sub_cost + rd_tick + co_cost);
+                    if (!call_list.back().tail) break;
                 }
             }
         }
 
-        void init_lua_ignore(lua_State* L) {
-            //忽略系统库
-            ignore(L, "io");
-            ignore(L, "os");
-            ignore(L, "math");
-            ignore(L, "utf8");
-            ignore(L, "debug");
-            ignore(L, "table");
-            ignore(L, "string");
-            ignore(L, "package");
-            ignore(L, "profile");
-            ignore(L, "coroutine");
-            //忽略系统函数
-            ignore(L, "type");
-            ignore(L, "next");
-            ignore(L, "load");
-            ignore(L, "print");
-            ignore(L, "pcall");
-            ignore(L, "pairs");
-            ignore(L, "error");
-            ignore(L, "assert");
-            ignore(L, "rawget");
-            ignore(L, "rawset");
-            ignore(L, "rawlen");
-            ignore(L, "xpcall");
-            ignore(L, "ipairs");
-            ignore(L, "select");
-            ignore(L, "dofile");
-            ignore(L, "require");
-            ignore(L, "loadfile");
-            ignore(L, "tostring");
-            ignore(L, "rawequal");
-            ignore(L, "getmetatable");
-            ignore(L, "setmetatable");
-            ignore(L, "collectgarbage");
-            //忽略一些特殊函数
-            m_names.emplace("for iterator", true);
-        }
-
         bool is_filter(call_frame& frame) {
-            //匿名函数, 不记录
-            if (!frame.name) return false;
+            //load加载的函数, 不记录
+            if (frame.line == 0) return true;
+            //观察的函数，需要记录
+            if (m_watch_funcs.find(frame.pointer) != m_watch_funcs.end()) return false;
             //命中函数名过滤，不记录
-            if (m_names.find(frame.name) != m_filters.end()) return false;
+            if (m_ignore_names.find(frame.name) != m_ignore_names.end()) return true;
             //命中系统函数，不记录
             if (!frame.inlua) {
-                if (m_ignores.find(frame.pointer) != m_ignores.end()) return false;
+                if (m_ignore_funcs.find(frame.pointer) != m_ignore_funcs.end()) return true;
             }
-            if (m_watchs.empty()) {
+            if (m_watch_files.empty()) {
                 //关注文件为空，检查过滤文件
-                return m_filters.find(frame.source) == m_filters.end();
+                return m_ignore_files.find(frame.source) != m_ignore_files.end();
             }
-            return m_watchs.find(frame.source) != m_watchs.end();
+            return m_watch_files.find(frame.source) != m_watch_files.end();
         }
 
         void record_eval(call_frame& frame, uint64_t call_cost) {
@@ -270,8 +264,8 @@ namespace lprofile {
             m_all_times += call_cost;
             if (is_filter(frame)) return;
             auto id = (uint64_t)frame.pointer;
-            auto handle = m_evals.extract(id);
-            if (handle.empty()) {
+            auto it = m_evals.find(id);
+            if (it == m_evals.end()) {
                 eval_data edata;
                 edata.call_count++;
                 edata.name = frame.name;
@@ -285,12 +279,29 @@ namespace lprofile {
                 m_evals.emplace(id, edata);
                 return;
             }
-            eval_data& edata = handle.mapped();
+            eval_data& edata = it->second;
             edata.call_count++;
             edata.total_time += call_cost;
-            if (call_cost > edata.max_time) edata.max_time = call_cost;
+            if (call_cost > edata.max_time) {
+                edata.max_time = call_cost;
+            }
             if (call_cost < edata.min_time) edata.min_time = call_cost;
-            m_evals.emplace(id, edata);
+        }
+
+        void init_lua_ignore(lua_State* L) {
+            auto ignores = {
+                //lua system library
+                "io", "os", "math", "utf8", "debug", "table", "string", "package", "profile", "coroutine",
+                // lua system function
+                "type", "next", "load", "print", "pcall", "pairs", "error", "assert", "rawget", "rawset",
+                "rawlen", "xpcall", "ipairs", "select", "dofile", "require", "loadfile", "tostring",
+                "tonumber", "rawequal", "setmetatable", "getmetatable", "collectgarbage",
+            };
+            for (auto& name : ignores) {
+                ignore(L, name);
+            }
+            // lua special function
+            ignore_func("for iterator");
         }
 
         uint64_t now() {
@@ -300,12 +311,13 @@ namespace lprofile {
 
     protected:
         uint64_t m_all_times = 0;
-        bool m_profilable = false;
-        deque<call_info> m_call_infos;
-        std::unordered_map<uint64_t, eval_data> m_evals;
-        std::unordered_map<uint64_t, bool> m_ignores;
-        std::unordered_map<string, bool> m_filters;
-        std::unordered_map<string, bool> m_watchs;
-        std::unordered_map<string, bool> m_names;
+        call_info* m_cur_ci = nullptr;
+        unordered_map<uint64_t, eval_data> m_evals;
+        unordered_map<string, bool> m_watch_files;
+        unordered_map<string, bool> m_ignore_names;
+        unordered_map<string, bool> m_ignore_files;
+        unordered_map<uint64_t, string> m_watch_funcs;
+        unordered_map<uint64_t, string> m_ignore_funcs;
+        unordered_map<lua_State*, call_info*> m_call_infos;
     };
 }

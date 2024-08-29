@@ -16,10 +16,20 @@
 
 # 用法
 ```lua
+local log_debug = logger.debug
 local profile = require('lprofile')
 
 profile.hook()
-profile.start()
+profile.enable()
 
-profile.dump()
+
+local PROFDUMP  = "{:<25} {:^9} {:^9} {:^9} {:^12} {:^8} {:^12} [{}]{}:{}]"
+
+log_debug("--------------------------------------------------------------------------------------------------------------------------------")
+log_debug("{:<25} {:^9} {:^9} {:^9} {:^12} {:^8} {:^12} {:<10}", "name", "avg", "min", "max", "all", "per(%)", "count", "source")
+log_debug("--------------------------------------------------------------------------------------------------------------------------------")
+for _, ev in pairs(profile.dump(50)) do
+    log_debug(PROFDUMP, ev.name, ev.avg, ev.min, ev.max, ev.all, ev.per, ev.count, ev.flag, ev.src, ev.line)
+end
+log_debug("--------------------------------------------------------------------------------------------------------------------------------")
 ```
