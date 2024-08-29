@@ -1,5 +1,5 @@
 # lprofile
-一个使用lua解析excel的xlsx/xlsm格式的库。
+一个基于luahook的lua性能测试库！
 
 # 依赖
 - [lua](https://github.com/xiyoo0812/lua.git)5.2以上
